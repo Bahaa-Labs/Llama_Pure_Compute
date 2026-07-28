@@ -58,7 +58,7 @@ Custom Triton DSL implementation of causal FlashAttention-v2 optimized for seque
 
 ## 🏛️ System Architecture & Engineering Concepts
 
-```text
+```
 +--------------------------------------------------------------------------+
 |                                    Llama_Pure_Compute                                 
 +--------------------------------------------------------------------------+
@@ -89,7 +89,7 @@ Key Engineering Features
 
 📂 Repository Layout
 
-'''text
+'''
 LLAMA_PURE_COMPUTE/
 ├── benchmarks/
 │   ├── benchmark_attention.py   # FlashAttention performance suite
