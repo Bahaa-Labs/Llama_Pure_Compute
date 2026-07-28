@@ -49,10 +49,10 @@ Custom Triton DSL implementation of causal FlashAttention-v2 optimized for seque
 | Sequence Length ($N$) | Backend | Latency (ms) | Compute Throughput | **Speedup vs PyTorch SDPA** |
 | :--- | :--- | :--- | :--- | :--- |
 | **128** | **Triton Flash-v2** | **0.0135 ms** | 19.87 TFLOPS | **1.70x** |
-| | PyTorch SDPA | 0.0229 ms | 11.72 TFLOPS | 1.00x |
+| | PyTorch SDPA | 0.02025 ms | 13.25 TFLOPS | 1.50x |
 | **256** | **Triton Flash-v2** | **0.0404 ms** | 26.57 TFLOPS | **1.23x** |
 | | PyTorch SDPA | 0.0497 ms | 21.61 TFLOPS | 1.00x |
-| **8192** | **Triton Flash-v2** | **20.935 ms** | **52.52 TFLOPS** | **1.01x** |
+| **8192** | **Triton Flash-v2** | **20.935 ms** | **52.52 TFLOPS** | **1.16x** |
 
 ---
 
