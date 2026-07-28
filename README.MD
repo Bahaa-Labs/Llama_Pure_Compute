@@ -18,7 +18,7 @@ Profiles collected using **NVIDIA Nsight Compute (NCU)** on an **NVIDIA GeForce 
 
 ### 1. Fused RMSNorm + SwiGLU Kernel (`rmsswiglu.cu`)
 
-By performing 128-bit vectorized loads (`uint4`), caching intermediate normalization scale factors ($rsqrt(\mu + \epsilon)$) in FP32 registers, and executing warp-level reduction primitives (`__shfl_down_sync`), our fused kernel completely removes intermediate global DRAM read/write passes across the RMSNorm-SwiGLU boundary.
+By performing 128-bit vectorized loads (`uint4`), caching intermediate normalization scale factors ($\text{rsqrt}(\mu + \epsilon)$) in FP32 registers, and executing warp-level reduction primitives (`__shfl_down_sync`), our fused kernel completely removes intermediate global DRAM read/write passes across the RMSNorm-SwiGLU boundary.
 
 * **3.56x High-Precision Speedup (FP32):** At 4096 tokens, standard PyTorch eager execution suffers massive DRAM serialization overhead (**44.95 ms**), whereas our fused CUDA kernel finishes in **12.61 ms**—demonstrating superior kernel-level pipeline efficiency.
 * **Peak Memory Bandwidth Saturation:** Reached **978.7 GB/s effective bandwidth (128.8% Speed-of-Light)** during single-token FP32 execution through aggressive register reuse and memory coalescing.
