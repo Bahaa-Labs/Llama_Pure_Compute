@@ -7,8 +7,6 @@
 #include <stdexcept>
 #include <string>
 #include <torch/extension.h>
-
-// Path to CPU C++ headers in include/
 #include "../include/kv_cache.h"
 
 namespace py = pybind11;
