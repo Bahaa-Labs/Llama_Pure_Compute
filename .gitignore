@@ -1,0 +1,32 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# C++ Build artifacts
+build/
+bin/
+lib/
+*.o
+*.obj
+*.a
+
+# Testing and Caches
+.cache/
+.pytest_cache/
+.triton/
+
+# IDE & Editor files
+.vscode/
+.idea/
+.profiles/
+
+# Environment
+.env
+*.venv
+env/
+venv/
+
+# Nsight Compute Profiler Reports
+*.ncu-rep
