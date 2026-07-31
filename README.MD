@@ -1,64 +1,141 @@
+<div align="center">
+
 # 🦙 Llama_Pure_Compute
 
-> **A low-level system for `RMSNorm+SwiGLU` fusion, `FlashAttention-v2`, and vectorized `CUDA` kernel execution.**
+### Production-Ready CUDA & Triton Runtime for High-Performance Llama Inference
 
-[![CUDA 12.0+](https://img.shields.io/badge/CUDA-12.0%2B-green.svg)](https://developer.nvidia.com/cuda-toolkit)
-[![PyTorch 2.0+](https://img.shields.io/badge/PyTorch-2.0%2B-ee4c2c.svg)](https://pytorch.org/)
-[![Triton-Language](https://img.shields.io/badge/Triton-Compiler-blue.svg)](https://github.com/triton-lang/triton)
-[![Fedora Workstation](https://img.shields.io/badge/Environment-Fedora%20Workstation-blueviolet.svg)](https://fedoraproject.org/)
-[![License: MIT](https://img.shields.io/badge/License-MIT-black.svg)](LICENSE)
+High-performance compute runtime for Llama-family models featuring **custom CUDA kernels**, **Triton FlashAttention-v2**, **vectorized Rotary Position Embeddings**, **in-place KV cache management**, and **PyBind11 native operators** for low-latency autoregressive inference.
 
-`Llama_Pure_Compute` is a custom high-performance systems engine designed to eliminate memory bandwidth bottlenecks and dispatch overheads in Llama-family LLMs. By engineering vectorized C++/CUDA C kernels via PyBind11 alongside targeted Triton DSL kernels, this repository provides zero-copy, highly fused execution across key LLM building blocks including **Fused RMSNorm + SwiGLU**, **Rotary Position Embeddings (RoPE)**, **In-Place KV-Cache Allocation**, and **FlashAttention-v2**.
+<br>
 
----
+![Python](https://img.shields.io/badge/Python-3.10+-3776AB?logo=python&logoColor=white)
+![CUDA](https://img.shields.io/badge/CUDA-12.0+-76B900?logo=nvidia&logoColor=white)
+![PyTorch](https://img.shields.io/badge/PyTorch-2.0+-EE4C2C?logo=pytorch&logoColor=white)
+![Triton](https://img.shields.io/badge/Triton-DSL-orange)
+![License](https://img.shields.io/badge/License-MIT-blue)
 
-## 🏆 Hardware Profiling & Key Performance Victories
-
-Profiles collected using **NVIDIA Nsight Compute (NCU)** on an **NVIDIA GeForce RTX 3080 (GA102)** testing both memory-bound single-token decoding and compute-bound long-sequence prefill phases.
-
-### 1. Fused RMSNorm + SwiGLU Kernel (`rmsswiglu.cu`)
-
-By performing 128-bit vectorized loads (`uint4`), caching intermediate normalization scale factors (rsqrt(mu + epsilon)) in FP32 registers, and executing warp-level reduction primitives (`__shfl_down_sync`), our fused kernel completely removes intermediate global DRAM read/write passes across the RMSNorm-SwiGLU boundary.
-
-* **3.56x High-Precision Speedup (FP32):** At 4096 tokens, standard PyTorch eager execution suffers massive DRAM serialization overhead (**44.95 ms**), whereas our fused CUDA kernel finishes in **12.61 ms**—demonstrating superior kernel-level pipeline efficiency.
-* **Peak Memory Bandwidth Saturation:** Reached **978.7 GB/s effective bandwidth (128.8% Speed-of-Light)** during single-token FP32 execution through aggressive register reuse and memory coalescing.
-* **Low-Latency Decoding (FP16 / BF16):** Reduces single-token auto-regressive generation latency from **0.689 ms down to 0.370 ms**
-(**1.86x speedup** in FP16, **1.78x** in BF16).
-
-#### RMSSwiGLU Profiling Benchmark (RTX 3080)
-
-| Precision | Sequence / Tokens | PyTorch Eager (ms) | Fused CUDA (ms) | **Speedup** | **Effective Bandwidth** | **TFLOPS** |
-| :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-| **FP32** | 4,096 tokens | 44.945 ms | **12.614 ms** | **3.56x** | 48.2 GB/s | 58.60 |
-| **FP32** | 1,024 tokens | 11.878 ms | **3.387 ms** | **3.51x** | 124.8 GB/s | 54.55 |
-| **FP32** | 1 token | 0.869 ms | **0.369 ms** | **2.36x** | **978.7 GB/s (128.8% SOL)** | 0.49 |
-| **FP16** | 1 token | 0.689 ms | **0.370 ms** | **1.86x** | 488.0 GB/s (64.2% SOL) | 0.49 |
-| **BF16** | 1 token | 0.660 ms | **0.370 ms** | **1.78x** | 488.0 GB/s (64.2% SOL) | 0.49 |
+</div>
 
 ---
 
-### 2. Custom Triton FlashAttention-v2 Kernel (`flash_attention.py`)
+## Overview
 
-Custom Triton DSL implementation of causal FlashAttention-v2 optimized for sequence processing ($B=2, H=32, D=128$).
+Modern Llama inference is dominated by memory-bound operations such as **RMSNorm**, **SwiGLU**, **Rotary Position Embeddings (RoPE)**, **KV cache updates**, and **attention**. Each introduces additional kernel launches, global memory traffic, and synchronization overhead that reduce GPU utilization.
 
-* **Short Sequence Overhead Reduction:** Outperforms PyTorch's native `scaled_dot_product_attention` (SDPA) by **1.70x** at short prompt lengths ($N=128$), reaching **620.81 GB/s memory bandwidth**.
-* **Near-Theoretical TFLOPS Scaling:** Scales linearly up to **52.52 TFLOPS** at $N=8192$, demonstrating high Tensor Core tile utilization.
+**Llama_Pure_Compute** addresses these bottlenecks by implementing optimized CUDA and Triton kernels that minimize memory movement, fuse execution stages, and integrate directly into PyTorch through native C++ extensions.
 
-#### FlashAttention-v2 Profiling Benchmark (RTX 3080)
-
-| Sequence Length ($N$) | Backend | Latency (ms) | Compute Throughput | **Speedup vs PyTorch SDPA** |
-| :--- | :--- | :--- | :--- | :--- |
-| **128** | **Triton Flash-v2** | **0.0135 ms** | 19.87 TFLOPS | **1.70x** |
-| | PyTorch SDPA | 0.0229 ms | 11.72 TFLOPS | 1.00x | 
-| **256** | **Triton Flash-v2** | **0.0404 ms** | 26.57 TFLOPS | **1.23x** |
-| | PyTorch SDPA | 0.0497 ms | 21.61 TFLOPS | 1.00x |
-| **8192** | **Triton Flash-v2** | **20.935 ms** | **52.52 TFLOPS** | **1.16x** |
+The project focuses on building reusable, production-oriented compute primitives rather than modifying model architectures.
 
 ---
 
-## 🏛️ System Architecture & Engineering Concepts
+## ✨ Features
 
+- 🚀 Fused **RMSNorm + SwiGLU** CUDA kernel
+- ⚡ Triton **FlashAttention-v2** implementation
+- 🧠 Vectorized Rotary Position Embeddings (RoPE)
+- 📦 In-place KV Cache allocation and updates
+- 🔥 Native PyBind11 CUDA operators
+- 📊 Nsight Compute performance profiling
+- 🐳 Docker-ready deployment
+- ☸️ Kubernetes deployment support
+- ✅ PyTorch-native integration
+
+---
+
+## Table of Contents
+
+- Performance
+- System Architecture
+- Repository Structure
+- Installation
+- Quick Start
+- Benchmarking
+- Testing
+- Deployment
+- License
+
+---
+
+# 📈 Performance
+
+All benchmarks were collected on an **NVIDIA GeForce RTX 3080 (GA102)** using **NVIDIA Nsight Compute**, covering both **memory-bound single-token decoding** and **compute-bound long-context prefill** workloads. :contentReference[oaicite:1]{index=1}
+
+## Fused RMSNorm + SwiGLU
+
+| Metric | Result |
+|---------|-------:|
+| Maximum FP32 Speedup | **3.56×** |
+| FP16 Decoding Speedup | **1.86×** |
+| BF16 Decoding Speedup | **1.78×** |
+| Peak Memory Bandwidth | **978.7 GB/s** |
+| Peak Throughput | **58.60 TFLOPS** |
+
+### Optimization Highlights
+
+- 128-bit vectorized memory loads (`uint4`)
+- Warp-level reductions (`__shfl_down_sync`)
+- FP32 accumulation for numerical stability
+- Register reuse to reduce global memory traffic
+- Single fused kernel replacing multiple PyTorch operators
+
+---
+
+## Triton FlashAttention-v2
+
+| Metric | Result |
+|---------|-------:|
+| Best Speedup | **1.70×** |
+| Peak Compute | **52.52 TFLOPS** |
+| Peak Memory Bandwidth | **620.81 GB/s** |
+
+Designed for efficient causal attention using Triton DSL with optimized Tensor Core utilization across both short and long sequence lengths. :contentReference[oaicite:2]{index=2}
+
+---
+
+# 🏛️ System Architecture
+
+Llama_Pure_Compute is organized into four independent layers, separating the Python runtime, native CUDA backend, custom operators, and benchmarking infrastructure.
+
+```text
+                               Llama_Pure_Compute
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                  High-Performance Llama Compute Runtime                     │
+└───────────────────────────────┬─────────────────────────────────────────────┘
+                                │
+        ┌───────────────────────┼────────────────────────┐
+        │                       │                        │
+        ▼                       ▼                        ▼
+┌──────────────────┐   ┌─────────────────────┐   ┌─────────────────────┐
+│ Python Runtime   │   │ Native Backend      │   │ Profiling & Testing │
+├──────────────────┤   ├─────────────────────┤   ├─────────────────────┤
+│ Model            │   │ CUDA Kernels        │   │ Nsight Compute      │
+│ Generation       │   │ Triton Kernels      │   │ Benchmarks          │
+│ KV Manager       │   │ PyBind11            │   │ Correctness Tests   │
+│ Sampling         │   │ Memory Operations   │   │ Performance Reports │
+└──────────────────┘   └─────────────────────┘   └─────────────────────┘
+                                │
+                                ▼
+                    Optimized Llama Inference Runtime
 ```
+
+---
+
+## Engineering Highlights
+
+| Component | Purpose |
+|-----------|---------|
+| **Fused CUDA Kernels** | Reduce kernel launches and intermediate memory traffic |
+| **Triton FlashAttention-v2** | High-throughput causal attention using Tensor Cores |
+| **PyBind11 Extensions** | Native CUDA operators integrated directly into PyTorch |
+| **Vectorized RoPE** | Efficient rotary position embedding computation |
+| **In-place KV Cache** | Eliminate allocation overhead during autoregressive decoding |
+| **Nsight Compute** | Low-level GPU profiling and performance analysis |
+
+---
+
+# 📂 Repository Structure
+
+```text
 +--------------------------------------------------------------------------+
 |                                    Llama_Pure_Compute                                 
 +--------------------------------------------------------------------------+
@@ -79,153 +156,264 @@ Custom Triton DSL implementation of causal FlashAttention-v2 optimized for seque
                                         rmsswiglu.h, kv_cache.h)           
 +--------------------------------------------------------------------------+
 
-Key Engineering Features
-
-    Warp-Level Parallel Reductions: Low-level RMSNorm variance calculations leverage warp shuffle intrinsics (__shfl_down_sync) to eliminate block-wide shared memory barrier latency.
-
-    Vectorized Instruction Emission: Emits 128-bit wide loads/stores via vector types (uint4 / float4) inside custom kernels (rope.cu and rmsswiglu.cu) to maximize memory bus utilization.
-
-    Zero-Copy In-Place Mutations: KV cache updates (kv_cache.cu) bypass PyTorch's autograd tracking and operate in-place on pre-allocated contiguous memory pools to avoid dynamic allocation churn during inference generation.
-
-📂 Repository Layout
-
-'''
-LLAMA_PURE_COMPUTE/
-├── benchmarks/
-│   ├── benchmark_attention.py   # FlashAttention performance suite
-│   ├── benchmark_rmsswiglu.py   # RMSNorm+SwiGLU micro-benchmarks
-│   └── profile_ncu.sh           # Nsight Compute profiling launcher
-├── profiles/                    # Generated NCU profile traces (.ncu-rep)
-├── src/
-│   └── csrc/
-│       ├── include/             # C++/CUDA Header definitions
-│       │   ├── kv_cache.h
-│       │   ├── rmsswiglu.h
-│       │   ├── rope.h
-│       │   └── utils.h          # Shared Warp Reductions & CUDA macros
-│       └── ops/                 # Low-Level CUDA Operators
-│           ├── bindings.cpp     # PyBind11 C++ module definitions
-│           ├── kv_cache.cu
-│           ├── rmsswiglu.cu
-│           └── rope.cu
-├── llama_pure_compute/          # Core Python Engine Package
-│   ├── triton_kernels/          # Isolated Triton DSL implementations
-│   │   ├── flash_attention.py
-│   │   └── rmsnorm.py
-│   ├── config.py                # Model hyperparameter specs
-│   ├── generate.py              # Generation & Sampling pipeline
-│   ├── kv_manager.py            # KV Cache Allocation API
-│   ├── model.py                 # Transformer Layer & Model Graph
-│   ├── ops.py                   # Custom Operator Registrations
-│   ├── sampler.py               # Top-K / Top-P / Temperature Samplers
-│   └── tokenizer.py             # Tokenizer Integration
-├── tests/                       # Complete Test & Correctness Suite
-│   ├── test_attention_correctness.py
-│   ├── test_generation.py
-│   ├── test_kv_cache.py
-│   ├── test_model_forward.py
-│   ├── test_rmsswiglu_correctness.py
-│   └── test_rope_correctness.py
-├── CMakeLists.txt               # C++ Standalone Build System
-├── pyproject.toml               # Python Package Build Configuration
-├── setup.py                     # Setuptools C++/CUDA extension builder
-└── README.md
-'''
-
-⚙️ Environment & Setup
-
-Engineered and profiled on Fedora Workstation within a containerized CUDA distrobox environment (cuda_env).
-Build & Installation
-Bash
-
-# 1. Activate PyTorch Virtual Environment
-source activate torch_env
-
-# 2. Enter containerized environment
-distrobox enter cuda_env
-
-# 3. Compile C++/CUDA extensions in-place
-pip install -e . --no-build-isolation
-
-💡 Quickstart & Usage
-Python
-
-import torch
-from llama_pure_compute.model import LlamaModel
-from llama_pure_compute.config import ModelConfig
-from llama_pure_compute.generate import Generator
-
-# Model Setup
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-config = ModelConfig(
-    dim=4096,
-    n_layers=32,
-    n_heads=32,
-    vocab_size=32000,
-    max_seq_len=2048
-)
-
-# Initialize optimized model with custom CUDA bindings
-model = LlamaModel(config).to(device=device, dtype=torch.float16)
-
-# Generate Text
-generator = Generator(model=model, config=config)
-output_tokens = generator.generate(
-    prompt_tokens=[1, 15043, 29892, 278],
-    max_gen_len=64,
-    temperature=0.7
-)
-
-🧪 Testing & Verification
-
-All operators are verified for numerical accuracy and gradient behavior against PyTorch reference outputs:
-Bash
-
-# Run unit tests across all custom kernel paths
-pytest tests/ -v
-
-Running Micro-Benchmarks & Nsight Compute Profiling
-Bash
-
-# Run standalone micro-benchmarks
-python benchmarks/benchmark_rmsswiglu.py
-python benchmarks/benchmark_attention.py
-
-# Profile low-level hardware counters with NCU
-bash benchmarks/profile_ncu.sh
-
-## 📦 Containerization & Cloud-Native Kubernetes Infrastructure
-
-`Llama_Pure_Compute` includes a production-grade containerization and Kubernetes orchestration pipeline designed to deploy fused CUDA runtime kernels with persistent model weight management under low-latency inference workloads.
-
-### 🛠️ Container Architecture ([`Dockerfile`](./Dockerfile))
-* **Multi-Stage Build Pipeline:** Built on `nvidia/cuda:12.2.0-runtime-ubuntu22.04` to keep the runtime image lean while shipping the compiled PyBind11 C++/CUDA shared objects (`_C.so`).
-* **Environment Isolation:** Bundles PyTorch, NumPy, and Triton execution dependencies directly with internal package resolution (`PYTHONPATH=/app/src`).
-* **Optimized Layer Caching:** Separates heavy runtime dependency installation from source-code iterations for sub-second CI/CD rebuilds.
-
-### ☸️ Kubernetes Deployment ([`k8s-deployment.yaml`](./k8s-deployment.yaml))
-* **Persistent Storage Binding (`PVC`):** Dynamically mounts persistent volume claims (`llama-models-pvc` -> `/models`) to retain model parameters and KV cache states across pod lifecycles.
-* **Resource Boundaries:** Strict request/limit constraints (`500m CPU / 1Gi RAM` request, `2 CPU / 4Gi RAM` limit) to prevent host memory starvation during high-batch decoding.
-* **Direct Containerd Sync:** Uses direct control-plane importing (`ctr -n k8s.io images import`) to bypass external registry latency during local cluster development.
-
-### 🚀 Local Cluster Execution Quickstart
-
-```bash
-# 1. Build local runtime container image
-docker build -t llama-pure-compute:v1 .
-
-# 2. Import container directly into Kubernetes containerd engine
-docker image save llama-pure-compute:v1 | docker exec -i desktop-control-plane ctr -n k8s.io images import -
-
-# 3. Apply manifest & trigger rolling deployment
-kubectl apply -f k8s-deployment.yaml
-kubectl rollout restart deployment/llama-pure-compute -n llama-compute
-
-# 4. Stream model execution logs
-kubectl logs -f deployment/llama-pure-compute -n llama-compute
-'''
 ---
 
-📜 License
+## Module Overview
 
-Distributed under the MIT License. See LICENSE for details.
+| Module | Responsibility |
+|---------|----------------|
+| **src/csrc** | Native CUDA kernels and PyBind11 bindings |
+| **triton_kernels** | Triton implementations of compute-intensive operators |
+| **model.py** | Llama model architecture and forward execution |
+| **generate.py** | Autoregressive generation pipeline |
+| **kv_manager.py** | KV cache allocation and update logic |
+| **ops.py** | Python interface to native CUDA operators |
+| **benchmarks/** | Micro-benchmarks and Nsight Compute profiling |
+| **tests/** | Numerical correctness and regression testing |
+
+---
+
+# ⚙️ Kernel Optimizations
+
+The runtime focuses on reducing memory traffic, minimizing synchronization overhead, and maximizing Tensor Core utilization.
+
+### Fused RMSNorm + SwiGLU
+
+- 128-bit vectorized memory loads (`uint4`)
+- FP32 accumulation for numerical stability
+- Warp-level reductions using `__shfl_down_sync`
+- Register reuse to reduce DRAM accesses
+- Single fused kernel replacing multiple PyTorch operators
+
+---
+
+### Triton FlashAttention-v2
+
+- Causal attention implementation
+- Block-wise softmax computation
+- Optimized Tensor Core utilization
+- Reduced memory movement for long-context inference
+
+---
+
+### Vectorized RoPE
+
+- Fused sine/cosine computation
+- Vectorized memory access
+- Reduced instruction count
+- Optimized for autoregressive decoding
+
+---
+
+### In-place KV Cache
+
+- Zero-copy cache updates
+- Pre-allocated contiguous memory pools
+- Elimination of repeated allocations
+- Optimized for low-latency token generation
+
+---
+
+# 🚀 Installation
+
+## Prerequisites
+
+- Python **3.10+**
+- CUDA **12.0+**
+- PyTorch **2.x**
+- NVIDIA GPU with Compute Capability **7.5+**
+- CMake **3.20+**
+
+Clone the repository and install the project.
+
+```bash
+git clone https://github.com/<your-username>/Llama_Pure_Compute.git
+
+cd Llama_Pure_Compute
+
+python -m venv .venv
+
+# Linux / macOS
+source .venv/bin/activate
+
+# Windows
+# .venv\Scripts\activate
+
+pip install --upgrade pip
+
+pip install -e .
+```
+
+---
+
+# ⚡ Quick Start
+
+## Build Native CUDA Extensions
+
+```bash
+python setup.py build_ext --inplace
+```
+
+---
+
+## Run Inference
+
+```bash
+python examples/generate.py \
+    --model llama-7b \
+    --prompt "Explain FlashAttention."
+```
+
+---
+
+## Execute Benchmarks
+
+CUDA Kernels
+
+```bash
+python benchmarks/benchmark_rmsswiglu.py
+```
+
+FlashAttention
+
+```bash
+python benchmarks/benchmark_attention.py
+```
+
+Nsight Compute
+
+```bash
+bash benchmarks/profile_ncu.sh
+```
+
+---
+
+# 🧪 Testing
+
+Run the complete correctness suite.
+
+```bash
+pytest -v
+```
+
+Run a single module.
+
+```bash
+pytest tests/test_rope.py
+```
+
+Continuous Integration validates:
+
+- CUDA extension compilation
+- Kernel correctness
+- Numerical accuracy
+- Performance regression tests
+- Static analysis
+- Code formatting
+
+---
+
+# 🐳 Deployment
+
+Build the container image.
+
+```bash
+docker build -t llama-pure-compute .
+```
+
+Run the container.
+
+```bash
+docker run --gpus all \
+    -it \
+    llama-pure-compute
+```
+
+For production deployments, Kubernetes manifests and deployment configurations are available in the project.
+
+---
+
+# 🛣️ Roadmap
+
+## Current
+
+- ✅ Fused RMSNorm + SwiGLU CUDA Kernel
+- ✅ Triton FlashAttention-v2
+- ✅ Vectorized RoPE
+- ✅ In-place KV Cache
+- ✅ PyBind11 Runtime
+- ✅ Nsight Compute Profiling
+- ✅ Benchmark Suite
+- ✅ Docker Support
+
+---
+
+## Planned
+
+- ⏳ FlashAttention-3
+- ⏳ FP8 Inference
+- ⏳ Multi-GPU Tensor Parallelism
+- ⏳ CUDA Graph Capture
+- ⏳ Quantized KV Cache
+- ⏳ Continuous Batching
+- ⏳ PagedAttention
+- ⏳ Multi-Node Inference
+
+---
+
+# 🤝 Contributing
+
+Contributions are welcome.
+
+Areas of interest include:
+
+- CUDA kernel optimization
+- Triton kernels
+- Llama inference optimizations
+- Memory management
+- Benchmarking
+- Documentation
+- Testing
+
+Before opening a Pull Request, please ensure:
+
+- Code is formatted
+- Tests pass
+- Benchmarks remain reproducible
+- Documentation is updated where applicable
+
+---
+
+# 📚 References
+
+This project builds upon ideas and research from the following technologies:
+
+- PyTorch
+- CUDA
+- Triton
+- FlashAttention
+- PyBind11
+- Hugging Face Transformers
+- Nsight Compute
+
+---
+
+# 📄 License
+
+Released under the **MIT License**.
+
+---
+
+<div align="center">
+
+## ⭐ Support the Project
+
+If you find **Llama_Pure_Compute** useful, consider giving the repository a **Star**.
+
+It helps improve project visibility, supports future development, and encourages continued open-source contributions.
+
+---
+
+**Built for high-performance GPU compute, efficient Llama inference, and production-grade systems engineering.**
+
+</div>
