@@ -147,10 +147,10 @@ Llama_Pure_Compute is organized into four independent layers, separating the Pyt
 |  └── triton_kernels/    --> Pure Python Triton DSL Implementations (FlashAttn, Norm) 
 +--------------------------------------------------------------------------+
 |  Custom C++/CUDA Core (src/csrc/)                                                    
-|  ├── ops/                                                                           |
-|  │   ├── rmsswiglu.cu   --> Fused RMSNorm + SwiGLU FP32-Accumulated Kernel            |
+|  ├── ops/                                                                           
+|  │   ├── rmsswiglu.cu   --> Fused RMSNorm + SwiGLU FP32-Accumulated Kernel            
 |  │   ├── rope.cu        --> Vectorized Rotary Positional Embeddings                   
-|  │   ├── kv_cache.cu    --> Direct In-Place Cache Mutation & Strided Copy            |
+|  │   ├── kv_cache.cu    --> Direct In-Place Cache Mutation & Strided Copy            
 |  │   └── bindings.cpp   --> PyBind11 C++ Extensions                                   
 |  └── include/           --> Low-Level CUDA Headers (utils.h, rope.h,  
                                         rmsswiglu.h, kv_cache.h)           
@@ -330,58 +330,6 @@ docker run --gpus all \
 ```
 
 For production deployments, Kubernetes manifests and deployment configurations are available in the project.
-
----
-
-# 🛣️ Roadmap
-
-## Current
-
-- ✅ Fused RMSNorm + SwiGLU CUDA Kernel
-- ✅ Triton FlashAttention-v2
-- ✅ Vectorized RoPE
-- ✅ In-place KV Cache
-- ✅ PyBind11 Runtime
-- ✅ Nsight Compute Profiling
-- ✅ Benchmark Suite
-- ✅ Docker Support
-
----
-
-## Planned
-
-- ⏳ FlashAttention-3
-- ⏳ FP8 Inference
-- ⏳ Multi-GPU Tensor Parallelism
-- ⏳ CUDA Graph Capture
-- ⏳ Quantized KV Cache
-- ⏳ Continuous Batching
-- ⏳ PagedAttention
-- ⏳ Multi-Node Inference
-
----
-
-# 🤝 Contributing
-
-Contributions are welcome.
-
-Areas of interest include:
-
-- CUDA kernel optimization
-- Triton kernels
-- Llama inference optimizations
-- Memory management
-- Benchmarking
-- Documentation
-- Testing
-
-Before opening a Pull Request, please ensure:
-
-- Code is formatted
-- Tests pass
-- Benchmarks remain reproducible
-- Documentation is updated where applicable
-
 ---
 
 # 📚 References
