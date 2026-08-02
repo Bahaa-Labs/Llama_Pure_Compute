@@ -1,6 +1,6 @@
 <div align="center">
 
-# 🦙 Llama_Pure_Compute
+# Llama_Pure_Compute
 
 ### Production-Ready CUDA & Triton Runtime for High-Performance Llama Inference
 
