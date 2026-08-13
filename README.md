@@ -227,7 +227,11 @@ The runtime focuses on reducing memory traffic, minimizing synchronization overh
 Clone the repository and install the project.
 
 ```bash
+<<<<<<< HEAD
 git clone https://github.com/<your-username>/Llama_Pure_Compute.git
+=======
+git clone https://github.com/Bahaa-Labs/Llama_Pure_Compute.git
+>>>>>>> backup/local-work
 
 cd Llama_Pure_Compute
 
@@ -259,7 +263,11 @@ python setup.py build_ext --inplace
 ## Run Inference
 
 ```bash
+<<<<<<< HEAD
 python examples/generate.py \
+=======
+python -m llama_pure_compute.generate \
+>>>>>>> backup/local-work
     --model llama-7b \
     --prompt "Explain FlashAttention."
 ```
@@ -299,7 +307,11 @@ pytest -v
 Run a single module.
 
 ```bash
+<<<<<<< HEAD
 pytest tests/test_rope.py
+=======
+pytest -v tests/test_rope_correctness.py
+>>>>>>> backup/local-work
 ```
 
 Continuous Integration validates:

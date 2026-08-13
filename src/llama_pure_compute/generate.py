@@ -1,153 +1,335 @@
-"""
-Autoregressive inference pipeline with support for Temperature, Top-K, 
-Top-P (Nucleus) sampling, Repetition Penalty, and KV-Cache management.
-"""
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Generator, Optional, Sequence
+
 import torch
 import torch.nn.functional as F
-from typing import List, Optional, Generator, Tuple
+
 from llama_pure_compute.config import LlamaModelConfig
+from llama_pure_compute.kv_manager import KVCacheManager
+
+
+@dataclass(frozen=True)
+class GenerationConfig:
+    max_new_tokens: int = 128
+    temperature: float = 0.0
+    top_k: int = 50
+    top_p: float = 0.9
+    repetition_penalty: float = 1.0
+    eos_token_ids: tuple[int, ...] = ()
 
 
 def apply_repetition_penalty(
     logits: torch.Tensor,
-    generated_tokens: torch.Tensor,
-    penalty: float
+    history: torch.Tensor,
+    penalty: float,
 ) -> torch.Tensor:
-    """Applies repetition penalty in-place on the output logits."""
-    if penalty == 1.0 or generated_tokens.numel() == 0:
+
+    if penalty <= 0:
+        raise ValueError(
+            "repetition_penalty must be > 0"
+        )
+
+    if penalty == 1.0 or history.numel() == 0:
         return logits
 
-    # Extract unique tokens present in current generation history per batch
-    score = torch.gather(logits, 1, generated_tokens)
-    # Apply penalty: if logit < 0, multiply; if logit > 0, divide
-    score = torch.where(score < 0, score * penalty, score / penalty)
-    logits.scatter_(1, generated_tokens, score)
+    scores = torch.gather(
+        logits,
+        -1,
+        history,
+    )
+
+    scores = torch.where(
+        scores < 0,
+        scores * penalty,
+        scores / penalty,
+    )
+
+    logits.scatter_(
+        -1,
+        history,
+        scores,
+    )
+
     return logits
 
 
-def sample_top_k_top_p(
+def sample_next_token(
     logits: torch.Tensor,
-    temperature: float = 0.7,
-    top_k: int = 50,
-    top_p: float = 0.9
+    *,
+    temperature: float,
+    top_k: int,
+    top_p: float,
 ) -> torch.Tensor:
-    """
-    Applies temperature, top-k filtering, and top-p (nucleus) masking to logits,
-    returning sampled token indices.
-    """
-    if temperature > 0.0:
-        logits = logits / temperature
-    else:
-        # Greedy decoding
-        return torch.argmax(logits, dim=-1, keepdim=True)
 
-    # 1. Top-K Masking
-    if top_k > 0:
-        top_k = min(top_k, logits.size(-1))
-        indices_to_remove = logits < torch.topk(logits, top_k)[0][..., -1:]
-        logits[indices_to_remove] = float("-inf")
-
-    # 2. Top-P (Nucleus) Masking
-    if top_p < 1.0:
-        sorted_logits, sorted_indices = torch.sort(logits, descending=True, dim=-1)
-        cumulative_probs = torch.cumsum(F.softmax(sorted_logits, dim=-1), dim=-1)
-
-        # Shift the masks to the right to keep the first token above threshold
-        sorted_indices_to_remove = cumulative_probs > top_p
-        sorted_indices_to_remove[..., 1:] = sorted_indices_to_remove[..., :-1].clone()
-        sorted_indices_to_remove[..., 0] = False
-
-        # Scatter sorted mask back to original indices
-        indices_to_remove = sorted_indices_to_remove.scatter(
-            1, sorted_indices, sorted_indices_to_remove
+    if temperature < 0:
+        raise ValueError(
+            "temperature must be >= 0"
         )
-        logits[indices_to_remove] = float("-inf")
 
-    # Sample from the resulting multinomial distribution
-    probs = F.softmax(logits, dim=-1)
-    next_token = torch.multinomial(probs, num_samples=1)
-    return next_token
+    if temperature == 0:
+        return torch.argmax(
+            logits,
+            dim=-1,
+            keepdim=True,
+        )
+
+    logits = logits / temperature
+
+    if top_k > 0:
+        k = min(
+            top_k,
+            logits.shape[-1],
+        )
+
+        values = torch.topk(
+            logits,
+            k,
+            dim=-1,
+        ).values
+
+        threshold = values[..., -1, None]
+
+        logits = logits.masked_fill(
+            logits < threshold,
+            float("-inf"),
+        )
+
+    if not 0 < top_p <= 1:
+        raise ValueError(
+            "top_p must be in (0, 1]"
+        )
+
+    if top_p < 1.0:
+        sorted_logits, sorted_indices = torch.sort(
+            logits,
+            descending=True,
+            dim=-1,
+        )
+
+        probs = F.softmax(
+            sorted_logits,
+            dim=-1,
+        )
+
+        cumulative = torch.cumsum(
+            probs,
+            dim=-1,
+        )
+
+        remove = cumulative > top_p
+
+        remove[..., 1:] = remove[
+            ...,
+            :-1,
+        ].clone()
+
+        remove[..., 0] = False
+
+        original_remove = torch.zeros_like(
+            remove
+        )
+
+        original_remove.scatter_(
+            -1,
+            sorted_indices,
+            remove,
+        )
+
+        logits = logits.masked_fill(
+            original_remove,
+            float("-inf"),
+        )
+
+    probs = F.softmax(
+        logits,
+        dim=-1,
+    )
+
+    return torch.multinomial(
+        probs,
+        num_samples=1,
+    )
 
 
 class LlamaGenerator:
-    """
-    High-level generation API managing prompt encoding, KV-Cache prefill,
-    and single-token decode loop execution.
-    """
+    def __init__(
+        self,
+        model: torch.nn.Module,
+        config: LlamaModelConfig,
+    ) -> None:
 
-    def __init__(self, model: torch.nn.Module, config: LlamaModelConfig):
         self.model = model
         self.config = config
-        self.device = next(model.parameters()).device
+
+        self.device = next(
+            model.parameters()
+        ).device
+
+        dtype = next(
+            model.parameters()
+        ).dtype
+
+        self.kv_cache = KVCacheManager(
+            num_layers=config.num_layers,
+            max_batch_size=1,
+            max_seq_len=config.max_seq_len,
+            n_kv_heads=config.num_kv_heads,
+            head_dim=config.head_dim,
+            dtype=dtype,
+            device=self.device,
+        )
+
+    def reset(self) -> None:
+        self.kv_cache.reset()
 
     @torch.inference_mode()
     def generate(
         self,
-        prompt_tokens: List[int],
-        max_new_tokens: int = 128,
-        temperature: float = 0.7,
-        top_k: int = 50,
-        top_p: float = 0.9,
-        repetition_penalty: float = 1.1,
-        stop_token_ids: Optional[List[int]] = None,
+        prompt_tokens: Sequence[int],
+        *,
+        generation: GenerationConfig,
     ) -> Generator[int, None, None]:
-        """
-        Generates tokens autoregressively, yielding token IDs one by one.
-        """
-        self.model.eval()
-        stop_tokens = set(stop_token_ids or [])
 
-        # Prepare initial input tensor [1, seq_len]
-        tokens = torch.tensor([prompt_tokens], dtype=torch.long, device=self.device)
-        generated_history = tokens.clone()
-
-        # 1. PREFILL PHASE (Process Prompt Tokens & Warm KV Cache)
-
-        # Forward pass over full prompt tokens
-        logits = self.model(tokens, start_pos=0)
-        
-        # Extract last token logits for sampling
-        next_logit = logits[:, -1, :].clone()
-        
-        if repetition_penalty != 1.0:
-            next_logit = apply_repetition_penalty(
-                next_logit, generated_history, repetition_penalty
+        if not prompt_tokens:
+            raise ValueError(
+                "prompt_tokens must not be empty"
             )
 
-        next_token = sample_top_k_top_p(
-            next_logit, temperature=temperature, top_k=top_k, top_p=top_p
+        prompt_len = len(prompt_tokens)
+
+        if (
+            prompt_len
+            + generation.max_new_tokens
+            > self.config.max_seq_len
+        ):
+            raise ValueError(
+                "Requested generation exceeds "
+                "configured max_seq_len."
+            )
+
+        self.model.eval()
+
+        self.reset()
+
+        self.kv_cache.begin_request(
+            batch_size=1
         )
-        
-        token_id = next_token.item()
+
+        prompt = torch.tensor(
+            [list(prompt_tokens)],
+            dtype=torch.long,
+            device=self.device,
+        )
+
+        # Pre-allocated token history.
+        total_capacity = (
+            prompt_len
+            + generation.max_new_tokens
+        )
+
+        history = torch.empty(
+            (
+                1,
+                total_capacity,
+            ),
+            dtype=torch.long,
+            device=self.device,
+        )
+
+        history[:, :prompt_len] = prompt
+
+        # ==============================================================
+        # PREFILL
+        # ==============================================================
+
+        positions = torch.arange(
+            prompt_len,
+            device=self.device,
+            dtype=torch.long,
+        ).unsqueeze(0)
+
+        logits = self.model(
+            prompt,
+            positions=positions,
+            kv_cache=self.kv_cache,
+            mask=None,
+        )
+
+        next_logits = logits[:, -1, :]
+
+        next_logits = apply_repetition_penalty(
+            next_logits,
+            history[:, :prompt_len],
+            generation.repetition_penalty,
+        )
+
+        next_token = sample_next_token(
+            next_logits,
+            temperature=generation.temperature,
+            top_k=generation.top_k,
+            top_p=generation.top_p,
+        )
+
+        history[:, prompt_len] = next_token
+
+        history_len = prompt_len + 1
+
+        token_id = int(
+            next_token.item()
+        )
+
         yield token_id
 
-        if token_id in stop_tokens:
+        if token_id in generation.eos_token_ids:
             return
 
-        generated_history = torch.cat([generated_history, next_token], dim=-1)
-        curr_pos = tokens.shape[1]
+        # ==============================================================
+        # DECODE
+        # ==============================================================
 
-        # 2. DECODE PHASE (Token-by-Token Autoregressive Loop)
-        
-        for _ in range(max_new_tokens - 1):
-            # Pass only single new token into model using active KV cache slot
-            logits = self.model(next_token, start_pos=curr_pos)
-            next_logit = logits[:, -1, :].clone()
+        for position in range(
+            prompt_len,
+            total_capacity - 1,
+        ):
 
-            if repetition_penalty != 1.0:
-                next_logit = apply_repetition_penalty(
-                    next_logit, generated_history, repetition_penalty
-                )
-
-            next_token = sample_top_k_top_p(
-                next_logit, temperature=temperature, top_k=top_k, top_p=top_p
+            position_ids = torch.tensor(
+                [[position]],
+                dtype=torch.long,
+                device=self.device,
             )
-            
-            token_id = next_token.item()
+
+            logits = self.model(
+                next_token,
+                positions=position_ids,
+                kv_cache=self.kv_cache,
+                mask=None,
+            )
+
+            next_logits = logits[:, -1, :]
+
+            next_logits = apply_repetition_penalty(
+                next_logits,
+                history[:, :history_len],
+                generation.repetition_penalty,
+            )
+
+            next_token = sample_next_token(
+                next_logits,
+                temperature=generation.temperature,
+                top_k=generation.top_k,
+                top_p=generation.top_p,
+            )
+
+            history[:, history_len] = next_token
+            history_len += 1
+
+            token_id = int(
+                next_token.item()
+            )
+
             yield token_id
 
-            if token_id in stop_tokens:
-                break
-
-            generated_history = torch.cat([generated_history, next_token], dim=-1)
-            curr_pos += 1
+            if token_id in generation.eos_token_ids:
+                return

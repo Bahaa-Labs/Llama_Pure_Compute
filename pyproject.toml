@@ -1,24 +1,100 @@
 [build-system]
-requires = ["setuptools>=61.0", "wheel", "torch>=2.0.0", "ninja"]
-build-backend = "setuptools.build_meta"
-[project]
-name = "llama_pure_compute"
-version = "0.1.0"
-description = "High-Performance C++/CUDA & Triton LLM Inference Engine"
-readme = "README.md"
-requires-python = ">=3.10"
-dependencies = [
-    "torch>=2.0.0",
-    "triton>=2.0.0",
-    "pytest"
+requires = [
+    "setuptools>=75",
+    "wheel",
+    "ninja",
 ]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "llama-pure-compute"
+dynamic = ["version"]
+description = "High-performance C++/CUDA and Triton runtime for Llama inference."
+readme = "README.md"
+requires-python = ">=3.10,<3.13"
+
+license = "MIT"
+
+authors = [
+    { name = "Bahaa Samir" }
+]
+
+keywords = [
+    "llm",
+    "llama",
+    "cuda",
+    "triton",
+    "pytorch",
+    "inference",
+    "gpu",
+    "deep-learning",
+    "machine-learning",
+]
+
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Operating System :: POSIX :: Linux",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+
+dependencies = [
+    "torch>=2.0,<3.0",
+    "triton>=2.0,<4.0",
+    "safetensors>=0.4,<1.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8,<9",
+    "ruff>=0.6,<1",
+    "black>=24,<26",
+    "mypy>=1.10,<2",
+    "build>=1.2,<2",
+]
+
+[project.scripts]
+llama-pure-compute = "llama_pure_compute.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/Bahaa-Labs/Llama_Pure_Compute"
+Repository = "https://github.com/Bahaa-Labs/Llama_Pure_Compute"
+Issues = "https://github.com/Bahaa-Labs/Llama_Pure_Compute/issues"
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+
+[tool.setuptools.dynamic]
+version = { attr = "llama_pure_compute._version.__version__" }
+
 [tool.setuptools.packages.find]
 where = ["src"]
+include = ["llama_pure_compute*"]
 
 [tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+addopts = [
+    "-ra",
+    "--strict-config",
+    "--strict-markers",
+]
 markers = [
-    "benchmark: marks tests as performance benchmarks (not correctness checks)",
+    "benchmark: performance benchmark, excluded from normal test runs",
+    "cuda: requires a CUDA-capable GPU",
 ]
-filterwarnings = [
-    "ignore::DeprecationWarning:torch.jit._script",
-]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.black]
+line-length = 100
+target-version = ["py310"]
+
+[tool.mypy]
+python_version = "3.10"
+ignore_missing_imports = true

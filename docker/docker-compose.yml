@@ -1,0 +1,32 @@
+services:
+  llama:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+
+    image: llama-pure-compute:latest
+
+    gpus: all
+
+    environment:
+      CUDA_VISIBLE_DEVICES: "0"
+      PYTHONUNBUFFERED: "1"
+
+    volumes:
+      - ./models:/models:ro
+
+    ports:
+      - "8000:8000"
+
+    restart: unless-stopped
+
+    command:
+      - python3
+      - -c
+      - |
+        import torch
+        print("PyTorch:", torch.__version__)
+        print("CUDA:", torch.version.cuda)
+        print("CUDA available:", torch.cuda.is_available())
+        if torch.cuda.is_available():
+            print("GPU:", torch.cuda.get_device_name(0))
