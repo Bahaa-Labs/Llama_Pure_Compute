@@ -1,16 +1,50 @@
 from __future__ import annotations
-import logging 
+
+import logging
+from dataclasses import dataclass
 from typing import Optional, Tuple, Union
+
 import torch
 
-from llama_pure_compute.ops import rope_forward, update_kv_cache
+from llama_pure_compute.ops import update_kv_cache
 
 logger = logging.getLogger("llama_pure_compute.kv_manager")
 
+
+@dataclass(frozen=True)
+class KVCacheSpec:
+    num_layers: int
+    max_batch_size: int
+    max_seq_len: int
+    num_kv_heads: int
+    head_dim: int
+    dtype: torch.dtype
+    device: torch.device
+
+
 class KVCacheManager:
-    """Manage static pre-allocated KV Caches for continuous decoding using custom CUDA kernels."""
+    """
+    Per-layer static KV-cache manager.
+
+    The cache is allocated once and reused across requests.
+
+    Layout per layer:
+        [batch, kv_heads, sequence, head_dim]
+
+    This implementation supports:
+        - batched prefill with a shared starting position
+        - autoregressive decode
+        - request reset without clearing the whole GPU allocation
+        - explicit per-layer cache ownership
+
+    It intentionally does not implement continuous batching yet.
+    That belongs to the next runtime stage.
+    """
+
     def __init__(
-        self, 
+        self,
+        *,
+        num_layers: int,
         max_batch_size: int,
         max_seq_len: int,
         n_kv_heads: int,
@@ -18,130 +52,297 @@ class KVCacheManager:
         dtype: torch.dtype = torch.float16,
         device: Union[str, torch.device] = "cuda",
     ) -> None:
-        self.max_batch_size = max_batch_size
-        self.max_seq_len = max_seq_len
-        self.n_kv_heads = n_kv_heads
-        self.head_dim = head_dim
-        self.dtype = dtype
-        self.device = torch.device(device)
-        
-        if self.device.type == "cuda" and not torch.cuda.is_available():
-            raise RuntimeError("KVCacheManager initialized on CUDA but CUDA is not available.")
-        
-        # Native PyTorch 4D Attention Layout [B, H, S, D]
-        self.k_cache: torch.Tensor = torch.zeros(
-            (max_batch_size, n_kv_heads, max_seq_len, head_dim),
-            dtype=self.dtype, device=self.device,
+        if num_layers <= 0:
+            raise ValueError("num_layers must be positive")
+
+        if max_batch_size <= 0:
+            raise ValueError("max_batch_size must be positive")
+
+        if max_seq_len <= 0:
+            raise ValueError("max_seq_len must be positive")
+
+        if n_kv_heads <= 0 or head_dim <= 0:
+            raise ValueError("n_kv_heads and head_dim must be positive")
+
+        self.spec = KVCacheSpec(
+            num_layers=num_layers,
+            max_batch_size=max_batch_size,
+            max_seq_len=max_seq_len,
+            num_kv_heads=n_kv_heads,
+            head_dim=head_dim,
+            dtype=dtype,
+            device=torch.device(device),
         )
-        self.v_cache: torch.Tensor = torch.zeros(
-            (max_batch_size, n_kv_heads, max_seq_len, head_dim),
-            dtype=self.dtype, device=self.device,
+
+        if (
+            self.spec.device.type == "cuda"
+            and not torch.cuda.is_available()
+        ):
+            raise RuntimeError(
+                "KVCacheManager requested CUDA but CUDA is unavailable."
+            )
+
+        self.device = self.spec.device
+
+        self.k_cache: list[torch.Tensor] = []
+        self.v_cache: list[torch.Tensor] = []
+
+        for _ in range(num_layers):
+            self.k_cache.append(
+                torch.empty(
+                    (
+                        max_batch_size,
+                        n_kv_heads,
+                        max_seq_len,
+                        head_dim,
+                    ),
+                    dtype=dtype,
+                    device=self.device,
+                )
+            )
+
+            self.v_cache.append(
+                torch.empty(
+                    (
+                        max_batch_size,
+                        n_kv_heads,
+                        max_seq_len,
+                        head_dim,
+                    ),
+                    dtype=dtype,
+                    device=self.device,
+                )
+            )
+
+        self.seq_lens = torch.zeros(
+            max_batch_size,
+            dtype=torch.int32,
+            device=self.device,
         )
-        
+
+        self.active_batch_size = 0
+
         logger.info(
-            f"Initialized KVCacheManager [Batch: {max_batch_size}, SeqLen: {max_seq_len}, "
-            f"Heads: {n_kv_heads}, Dim: {head_dim}] | Memory: {self._get_memory_footprint_mb():.2f} MB"
+            "Allocated KV cache: layers=%d batch=%d seq=%d kv_heads=%d head_dim=%d memory=%.2f GiB",
+            num_layers,
+            max_batch_size,
+            max_seq_len,
+            n_kv_heads,
+            head_dim,
+            self.memory_footprint_bytes() / (1024**3),
         )
-        
-    def _get_memory_footprint_mb(self) -> float:
-        bytes_per_element = torch.tensor([], dtype=self.dtype).element_size()
-        total_elements = self.k_cache.numel() + self.v_cache.numel()
-        return (total_elements * bytes_per_element) / (1024 * 1024)
+
+    @property
+    def max_batch_size(self) -> int:
+        return self.spec.max_batch_size
+
+    @property
+    def max_seq_len(self) -> int:
+        return self.spec.max_seq_len
+
+    @property
+    def num_layers(self) -> int:
+        return self.spec.num_layers
+
+    @property
+    def n_kv_heads(self) -> int:
+        return self.spec.num_kv_heads
+
+    @property
+    def head_dim(self) -> int:
+        return self.spec.head_dim
+
+    @property
+    def dtype(self) -> torch.dtype:
+        return self.spec.dtype
+
+    def memory_footprint_bytes(self) -> int:
+        total = 0
+
+        for layer_cache in self.k_cache:
+            total += layer_cache.numel() * layer_cache.element_size()
+
+        for layer_cache in self.v_cache:
+            total += layer_cache.numel() * layer_cache.element_size()
+
+        return total
+
+    def begin_request(
+        self,
+        batch_size: int,
+    ) -> None:
+        """
+        Start a new static-batch request.
+
+        No VRAM clearing is performed. Logical lengths determine validity.
+        """
+        if batch_size <= 0:
+            raise ValueError("batch_size must be positive")
+
+        if batch_size > self.max_batch_size:
+            raise ValueError(
+                f"batch_size={batch_size} exceeds "
+                f"max_batch_size={self.max_batch_size}"
+            )
+
+        self.active_batch_size = batch_size
+        self.seq_lens[:batch_size].zero_()
+
+    def reset(self) -> None:
+        """
+        Reset logical state without memset'ing the complete KV allocation.
+        """
+        if self.active_batch_size:
+            self.seq_lens[: self.active_batch_size].zero_()
+
+        self.active_batch_size = 0
+
+    def current_seq_len(self, batch_idx: int = 0) -> int:
+        if batch_idx < 0 or batch_idx >= self.max_batch_size:
+            raise IndexError("invalid batch index")
+
+        return int(self.seq_lens[batch_idx].item())
 
     @torch.no_grad()
     def update(
         self,
-        key_states: torch.Tensor,   
-        value_states: torch.Tensor, 
+        *,
+        layer_idx: int,
+        key_states: torch.Tensor,
+        value_states: torch.Tensor,
         start_pos: int,
-        seq_len: int,
-        slot_mapping: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
-        Scatter-updates new K and V states into static 4D cache buffers.
+        Write one layer's K/V states into the corresponding cache.
+
+        key_states/value_states:
+            [B, KV_HEADS, SEQ, D]
         """
-        bsz = key_states.shape[0]
-        
-        if bsz > self.max_batch_size:
-            raise ValueError(f"Batch size {bsz} exceeds maximum pre-allocated batch size {self.max_batch_size}")
-        if slot_mapping is None and (start_pos + seq_len > self.max_seq_len):
-            raise ValueError(f"Sequence position {start_pos + seq_len} exceeds max sequence length {self.max_seq_len}")
-        
-        # Source input states: [bsz, n_kv_heads, seq_len, head_dim] -> [num_tokens, n_kv_heads, head_dim]
-        k_src = key_states.permute(0, 2, 1, 3).reshape(-1, self.n_kv_heads, self.head_dim).contiguous()
-        v_src = value_states.permute(0, 2, 1, 3).reshape(-1, self.n_kv_heads, self.head_dim).contiguous()
-
-        if slot_mapping is None:
-            batch_offsets = (
-                torch.arange(bsz, device=key_states.device, dtype=torch.int64) * self.max_seq_len
-            ).unsqueeze(1)
-            pos_offsets = torch.arange(
-                start_pos, start_pos + seq_len, device=key_states.device, dtype=torch.int64
-            ).unsqueeze(0)
-            
-            slot_mapping_tensor = (batch_offsets + pos_offsets).view(-1)
-        else:
-            slot_mapping_tensor = slot_mapping
-
-        if key_states.is_cuda and self.k_cache.is_cuda:
-            update_kv_cache(
-                key_src=k_src,
-                value_src=v_src,
-                key_cache=self.k_cache,
-                value_cache=self.v_cache,
-                slot_mapping=slot_mapping_tensor,
+        if not 0 <= layer_idx < self.num_layers:
+            raise IndexError(
+                f"layer_idx={layer_idx} outside [0, {self.num_layers})"
             )
-        else:
-            # CPU Fallback: Convert 1D slot indices to explicit 4D [b, h, s, d] indexing
-            num_tokens = k_src.shape[0]
-            batch_indices = slot_mapping_tensor // self.max_seq_len
-            seq_indices = slot_mapping_tensor % self.max_seq_len
 
-            for i in range(num_tokens):
-                b = batch_indices[i].item()
-                s = seq_indices[i].item()
-                if b < 0 or s < 0:
-                    continue
-                self.k_cache[b, :, s, :] = k_src[i]
-                self.v_cache[b, :, s, :] = v_src[i]
+        if key_states.ndim != 4 or value_states.ndim != 4:
+            raise ValueError(
+                "key_states and value_states must be [B, H, S, D]"
+            )
 
-        keys_out = self.k_cache[:bsz, :, : start_pos + seq_len, :]
-        values_out = self.v_cache[:bsz, :, : start_pos + seq_len, :]
-        
-        return keys_out, values_out
+        if key_states.shape != value_states.shape:
+            raise ValueError("K/V shapes must match")
 
-    @torch.no_grad()
-    def update_with_rope(
-        self,
-        query_states: torch.Tensor,
-        key_states: torch.Tensor,   
-        value_states: torch.Tensor, 
-        cos: torch.Tensor,
-        sin: torch.Tensor,
-        start_pos: int,
-        seq_len: int,
-        position_ids: Optional[torch.Tensor] = None,
-        slot_mapping: Optional[torch.Tensor] = None,
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        q_rot, k_rot = rope_forward(
-            q=query_states,
-            k=key_states,
-            cos=cos,
-            sin=sin,
-            position_ids=position_ids,
+        batch_size, kv_heads, seq_len, head_dim = key_states.shape
+
+        if kv_heads != self.n_kv_heads:
+            raise ValueError(
+                f"expected {self.n_kv_heads} KV heads, got {kv_heads}"
+            )
+
+        if head_dim != self.head_dim:
+            raise ValueError(
+                f"expected head_dim={self.head_dim}, got {head_dim}"
+            )
+
+        if batch_size > self.max_batch_size:
+            raise ValueError("batch size exceeds cache capacity")
+
+        if start_pos < 0:
+            raise ValueError("start_pos must be non-negative")
+
+        end_pos = start_pos + seq_len
+
+        if end_pos > self.max_seq_len:
+            raise ValueError(
+                f"KV cache overflow: end_pos={end_pos}, "
+                f"max_seq_len={self.max_seq_len}"
+            )
+
+        k_src = (
+            key_states
+            .permute(0, 2, 1, 3)
+            .contiguous()
+            .view(-1, self.n_kv_heads, self.head_dim)
         )
-        
-        k_cached, v_cached = self.update(
-            key_states=k_rot,
-            value_states=value_states,
-            start_pos=start_pos,
-            seq_len=seq_len,
+
+        v_src = (
+            value_states
+            .permute(0, 2, 1, 3)
+            .contiguous()
+            .view(-1, self.n_kv_heads, self.head_dim)
+        )
+
+        batch_offsets = (
+            torch.arange(
+                batch_size,
+                device=key_states.device,
+                dtype=torch.int64,
+            )
+            * self.max_seq_len
+        ).unsqueeze(1)
+
+        pos_offsets = torch.arange(
+            start_pos,
+            end_pos,
+            device=key_states.device,
+            dtype=torch.int64,
+        ).unsqueeze(0)
+
+        slot_mapping = (
+            batch_offsets + pos_offsets
+        ).reshape(-1)
+
+        update_kv_cache(
+            key_src=k_src,
+            value_src=v_src,
+            key_cache=self.k_cache[layer_idx],
+            value_cache=self.v_cache[layer_idx],
             slot_mapping=slot_mapping,
         )
-        
-        return q_rot, k_cached, v_cached
 
-    def reset(self) -> None:
-        self.k_cache.zero_()
-        self.v_cache.zero_()
-        logger.debug("KV Cache memory pool reset.")
+        self.seq_lens[:batch_size] = end_pos
+
+        return (
+            self.k_cache[layer_idx][
+                :batch_size,
+                :,
+                :end_pos,
+                :,
+            ],
+            self.v_cache[layer_idx][
+                :batch_size,
+                :,
+                :end_pos,
+                :,
+            ],
+        )
+
+    def get(
+        self,
+        *,
+        layer_idx: int,
+        batch_size: int,
+        seq_len: int,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        if not 0 <= layer_idx < self.num_layers:
+            raise IndexError("invalid layer index")
+
+        if batch_size > self.max_batch_size:
+            raise ValueError("batch size exceeds cache capacity")
+
+        if seq_len > self.max_seq_len:
+            raise ValueError("sequence length exceeds cache capacity")
+
+        return (
+            self.k_cache[layer_idx][
+                :batch_size,
+                :,
+                :seq_len,
+                :,
+            ],
+            self.v_cache[layer_idx][
+                :batch_size,
+                :,
+                :seq_len,
+                :,
+            ],
+        )

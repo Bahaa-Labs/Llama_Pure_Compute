@@ -1,32 +1,56 @@
-# Byte-compiled / optimized / DLL files
-__pycache__/
-*.py[cod]
-*$py.class
+# Python packaging
+*.egg-info/
+.eggs/
+dist/
+
+# Type checking / linting
+.mypy_cache/
+.ruff_cache/
+
+# CMake
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+compile_commands.json
+install_manifest.txt
+
+# CUDA / Nsight
+*.ncu-rep
+*.nsys-rep
+*.qdrep
+*.sqlite
+
+# Benchmark artifacts
+benchmarks/results/raw/
+benchmarks/reports/generated/
+
+# Local model files
+models/
+checkpoints/
+# Build artifacts
+build/
 *.so
 
-# C++ Build artifacts
-build/
-bin/
-lib/
-*.o
-*.obj
-*.a
+# Python cache
+__pycache__/
+*.py[cod]
 
-# Testing and Caches
-.cache/
-.pytest_cache/
-.triton/
-
-# IDE & Editor files
+# Local IDE
 .vscode/
-.idea/
-.profiles/
 
-# Environment
-.env
-*.venv
-env/
-venv/
+# Local artifacts
+artifacts/
 
-# Nsight Compute Profiler Reports
-*.ncu-rep
+# Build artifacts
+build/
+*.so
+
+# Python cache
+__pycache__/
+*.py[cod]
+
+# IDE
+.vscode/
+
+# Local artifacts
+artifacts/
